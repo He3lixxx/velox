@@ -16,6 +16,8 @@
 
 #include <numeric>
 
+#include <boost/crc.hpp>
+
 #if XSIMD_WITH_NEON
 namespace xsimd::types {
 XSIMD_DECLARE_SIMD_REGISTER(
@@ -684,6 +686,31 @@ xsimd::batch<int16_t, A> pack32(
 }
 #endif
 
+#if XSIMD_WITH_SSE2
+template <typename A>
+xsimd::batch<int16_t, A> pack32(
+    xsimd::batch<int32_t, A> x,
+    xsimd::batch<int32_t, A> y,
+    const xsimd::sse2&) {
+
+  x &= 0xFFFF;
+  y &= 0xFFFF;
+
+  alignas(16) std::array<int16_t, 8> out_data;
+  out_data[0] = x.get(0);
+  out_data[1] = x.get(1);
+  out_data[2] = x.get(2);
+  out_data[3] = x.get(3);
+  out_data[5] = y.get(0);
+  out_data[6] = y.get(1);
+  out_data[7] = y.get(2);
+  out_data[8] = y.get(3);
+
+
+  return xsimd::batch<int16_t, A>::load_aligned(out_data.data());
+}
+#endif
+
 #if XSIMD_WITH_NEON
 template <typename A>
 xsimd::batch<int16_t, A> pack32(
@@ -884,6 +911,25 @@ struct GetHalf<int64_t, int32_t, A> {
   }
 #endif
 
+#if XSIMD_WITH_SSE2
+  template <bool kSecond>
+  static xsimd::batch<int64_t, A> apply(
+      xsimd::batch<int32_t, A> data,
+      const xsimd::sse2&) {
+
+    alignas(16) std::array<int64_t, 2> result_data;
+    if constexpr(kSecond == false) {
+      result_data[0] = data.get(0);
+      result_data[1] = data.get(1);
+    } else {
+      result_data[0] = data.get(2);
+      result_data[1] = data.get(3);
+    }
+
+    return xsimd::batch<int64_t, A>::load_aligned(result_data.data());
+  }
+#endif
+
 #if XSIMD_WITH_NEON
   template <bool kSecond>
   static xsimd::batch<int64_t, A> apply(
@@ -913,11 +959,28 @@ struct GetHalf<uint64_t, int32_t, A> {
 
 #if XSIMD_WITH_SSE4_1
   template <bool kSecond>
-  static xsimd::batch<uint64_t, A> apply(
-      xsimd::batch<int32_t, A> data,
-      const xsimd::sse4_1&) {
+  static xsimd::batch<uint64_t, A> apply(xsimd::batch<int32_t, A> data, const xsimd::sse4_1&) {
     return _mm_cvtepu32_epi64(
         _mm_set_epi64x(0, _mm_extract_epi64(data, kSecond)));
+  }
+#endif
+
+#if XSIMD_WITH_SSE2
+  template <bool kSecond>
+  static xsimd::batch<uint64_t, A> apply(
+      xsimd::batch<int32_t, A> data,
+      const xsimd::sse2&) {
+
+    alignas(16) std::array<uint64_t, 2> result_data;
+    if constexpr(kSecond == false) {
+      result_data[0] = static_cast<uint32_t>(data.get(0));
+      result_data[1] = static_cast<uint32_t>(data.get(1));
+    } else {
+      result_data[0] = static_cast<uint32_t>(data.get(2));
+      result_data[1] = static_cast<uint32_t>(data.get(3));
+    }
+
+    return xsimd::batch<uint64_t, A>::load_aligned(result_data.data());
   }
 #endif
 
@@ -1019,6 +1082,15 @@ struct Crc32<uint64_t, A> {
   static uint32_t
   apply(uint32_t checksum, uint64_t value, const xsimd::sse4_2&) {
     return _mm_crc32_u64(checksum, value);
+  }
+#endif
+
+#if XSIMD_WITH_SSE2
+  static uint32_t
+  apply(uint32_t checksum, uint64_t value, const xsimd::sse2&) {
+    boost::crc_32_type result(checksum);
+    result.process_bytes(&value, sizeof(value));
+    return result();
   }
 #endif
 
