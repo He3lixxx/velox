@@ -17,6 +17,8 @@
 #include <bit>
 #include <numeric>
 
+#include <boost/crc.hpp>
+
 namespace facebook::velox::simd {
 
 namespace detail {
@@ -67,21 +69,13 @@ struct BitMask<T, A> {
     //        0); int hi = std::accumulate(mask_arr.begin() + 8, mask_arr.end(),
     //        0); return (hi << 8) | lo;
 
-    constexpr int VEC_SIZE = xsimd::batch_bool<T, A>::size;
-    using MaskT __attribute__((ext_vector_type(VEC_SIZE))) = bool;
-    auto bitmask = __builtin_convertvector(mask.data, MaskT);
-    if constexpr (VEC_SIZE < 8) {
-      uint8_t scalar_bitmask = reinterpret_cast<uint8_t&>(bitmask);
-      return scalar_bitmask & ((1 << VEC_SIZE) - 1); // clear unused high bits
-    } else if (VEC_SIZE == 8) {
-      return reinterpret_cast<uint8_t&>(bitmask);
-    } else if (VEC_SIZE == 16) {
-      return reinterpret_cast<uint16_t&>(bitmask);
-    } else if (VEC_SIZE == 32) {
-      return reinterpret_cast<uint32_t&>(bitmask);
-    } else {
-      return reinterpret_cast<uint64_t&>(bitmask);
+    int result;
+    for (size_t i = 0; i < mask.size; ++i) {
+      if (mask.data[i]) {
+        result |= 1 << i;
+      }
     }
+    return result;
   }
 
   static xsimd::batch_bool<T, A> fromBitMask(int mask, const A&) {
@@ -342,27 +336,23 @@ xsimd::batch<T, A> genericMaskGather(
     const T* base,
     xsimd::batch<IndexType, IdxA> vindex) {
   constexpr int N = xsimd::batch<T, A>::size;
-  constexpr int IndexVecSize = N * sizeof(IndexType);
-  using IndexVecT = typename xsimd::batch<IndexType, IdxA>::register_type;
 
-  auto idxs = vindex.data;
-  idxs = __builtin_convertvector(mask.data, IndexVecT) ? idxs : IndexVecT{};
+  alignas(A::alignment()) T dst[N];
+  alignas(A::alignment()) T sr[N];
+  alignas(A::alignment()) bool ma[N];
 
-  xsimd::batch<T, A> gathered;
-  if constexpr (kScale == sizeof(T)) {
-    for (int i = 0; i < N; ++i) {
-      gathered.data[i] = *(base + idxs[i]);
-    }
-  } else {
-    const auto* bytes = reinterpret_cast<const char*>(base);
-    idxs *= kScale;
-    for (int i = 0; i < N; ++i) {
-      gathered.data[i] = *reinterpret_cast<const T*>(bytes + idxs[i]);
+  src.store_aligned(sr);
+  mask.store_aligned(ma);
+  auto bytes = reinterpret_cast<const char*>(base);
+
+  for (int i = 0; i < N; ++i) {
+    if (ma[i]) {
+      dst[i] = *reinterpret_cast<const T*>(bytes + vindex.data[i] * kScale);
+    } else {
+      dst[i] = sr[i];
     }
   }
-
-  auto res = mask.data ? gathered.data : src.data;
-  return res;
+  return xsimd::load_aligned(dst);
 }
 
 template <typename T, typename A>
@@ -491,70 +481,32 @@ struct Gather<T, int64_t, A, 8> {
 
 // Concatenates the low 16 bits of each lane in 'x' and 'y' and
 // returns the result as 16x16 bits.
-// Our version is better than or equal to original code.
-// See https://godbolt.org/z/x8Enxjnbn
 template <typename A>
 xsimd::batch<int16_t, A> pack32(
     xsimd::batch<int32_t, A> x,
     xsimd::batch<int32_t, A> y,
     const xsimd::generic&) {
-  constexpr int HALF_SIZE = sizeof(xsimd::batch<uint16_t>::register_type) / 2;
-  using Vec16HalfT __attribute__((vector_size(HALF_SIZE))) = uint16_t;
+  alignas(2 * x.size) std::array<uint16_t, 2 * x.size> out_data;
+  for (size_t i = 0; i < x.size; ++i) {
+    out_data[i] = static_cast<uint32_t>(x.get(i));
+  }
+  for (size_t i = 0; i < y.size; ++i) {
+    out_data[x.size + i] = static_cast<uint32_t>(y.get(i));
+  }
 
-  auto xHalf = __builtin_convertvector(x.data, Vec16HalfT);
-  auto yHalf = __builtin_convertvector(y.data, Vec16HalfT);
-
-  xsimd::batch<int16_t> res;
-  *(reinterpret_cast<Vec16HalfT*>(&res.data) + 0) = xHalf;
-  *(reinterpret_cast<Vec16HalfT*>(&res.data) + 1) = yHalf;
-  return res;
+  return xsimd::batch<int16_t, A>::load_aligned(out_data.data());
 }
 
 template <typename T, typename A>
 xsimd::batch<T, A> genericPermute(xsimd::batch<T, A> data, const int32_t* idx) {
   constexpr int N = xsimd::batch<T, A>::size;
-  //  alignas(A::alignment()) T src[N];
-  //  alignas(A::alignment()) T dst[N];
-  //  data.store_aligned(src);
-  //  for (int i = 0; i < N; ++i) {
-  //    dst[i] = src[idx[i]];
-  //  }
-  //  return xsimd::load_aligned<A>(dst);
-  constexpr int INDEX_VEC_SIZE = N * sizeof(int32_t);
-  using IndexVecT __attribute__((vector_size(INDEX_VEC_SIZE))) = int32_t;
-  auto idx_vec = *reinterpret_cast<const IndexVecT*>(idx);
-
-  auto res = __builtin_shufflevector(
-      data.data,
-      __builtin_convertvector(
-          idx_vec, typename xsimd::batch<T, A>::register_type));
-  return res;
-}
-
-template <typename A>
-xsimd::batch<float, A> genericPermute(
-    xsimd::batch<float, A> data,
-    const int32_t* idx) {
-  constexpr int N = xsimd::batch<float, A>::size;
-  constexpr int INDEX_VEC_SIZE = N * sizeof(int32_t);
-  using IndexVecT __attribute__((vector_size(INDEX_VEC_SIZE))) = int32_t;
-  auto idx_vec = *reinterpret_cast<const IndexVecT*>(idx);
-  return __builtin_shufflevector(
-      reinterpret_cast<IndexVecT&>(data.data), idx_vec);
-}
-
-template <typename A>
-xsimd::batch<double, A> genericPermute(
-    xsimd::batch<double, A> data,
-    const int32_t* idx) {
-  constexpr int N = xsimd::batch<double, A>::size;
-  constexpr int INDEX_VEC_SIZE = N * sizeof(int32_t);
-  using IndexVecT __attribute__((vector_size(INDEX_VEC_SIZE))) = int32_t;
-  auto idx_vec = *reinterpret_cast<const IndexVecT*>(idx);
-  using DoubleVecT __attribute__((vector_size(A::size()))) = int64_t;
-  return __builtin_shufflevector(
-      reinterpret_cast<DoubleVecT&>(data.data),
-      __builtin_convertvector(idx_vec, DoubleVecT));
+   alignas(A::alignment()) T src[N];
+   alignas(A::alignment()) T dst[N];
+   data.store_aligned(src);
+   for (int i = 0; i < N; ++i) {
+     dst[i] = src[idx[i]];
+   }
+   return xsimd::load_aligned<A>(dst);
 }
 
 template <typename T, typename A>
@@ -659,39 +611,28 @@ namespace detail {
 
 template <typename TargetT, typename SourceT, typename A>
 struct GetHalf {
+  static_assert(std::is_same_v<SourceT, int32_t>, "unexpected?");
+
   template <bool kSecond>
   static xsimd::batch<TargetT, A> apply(
       xsimd::batch<SourceT, A> data,
       const xsimd::generic&) {
-    constexpr int N = xsimd::batch<SourceT, A>::size;
-    constexpr int HalfN = N / 2;
+    constexpr size_t offset = kSecond * data.size / 2;
 
-    using HalfT __attribute__((vector_size(HalfN * sizeof(SourceT)))) = SourceT;
-    HalfT* half = reinterpret_cast<HalfT*>(&data) + kSecond;
-    using TargetVecT __attribute__((vector_size(HalfN * sizeof(TargetT)))) =
-        TargetT;
+    // original AVX code uses cvtepi with sign-extension if TargetT is signed,
+    // otherwise cvtepu with zero-extension.
 
-    // Kinda hacky, but this is what the original code expects.
-    if constexpr (
-        std::is_same_v<SourceT, int32_t> && std::is_same_v<TargetT, uint64_t>) {
-      using UnsignedSourceT
-          __attribute__((vector_size(HalfN * sizeof(SourceT)))) = uint32_t;
-      auto reinterpret_unsigned = reinterpret_cast<UnsignedSourceT&>(*half);
-      return __builtin_convertvector(reinterpret_unsigned, TargetVecT);
-    } else {
-      return __builtin_convertvector(*half, TargetVecT);
+    alignas(data.size) std::array<TargetT, data.size / 2> result_data;
+    for (size_t i = 0; i < data.size / 2; ++i) {
+      if constexpr (std::is_unsigned_v<TargetT>) {
+        result_data[i] =
+            static_cast<std::make_unsigned_t<SourceT>>(data.get(offset + i));
+      } else {
+        result_data[i] = data.get(offset + i);
+      }
     }
-  }
 
-  // SourceT == TargetT
-  template <bool kSecond>
-  static HalfBatch<TargetT, A> applySame(
-      xsimd::batch<TargetT, A> data,
-      const xsimd::generic&) {
-    constexpr int N = xsimd::batch<TargetT, A>::size;
-    constexpr int HalfN = N / 2;
-    using HalfT __attribute__((vector_size(HalfN * sizeof(TargetT)))) = TargetT;
-    return *(reinterpret_cast<HalfT*>(&data) + kSecond);
+    return xsimd::batch<TargetT, A>::load_aligned(result_data.data());
   }
 };
 
@@ -708,22 +649,15 @@ template <typename T, typename A>
 struct Filter<T, A, 2> {
   static xsimd::batch<T, A>
   apply(xsimd::batch<T, A> data, int mask, const xsimd::generic&) {
-    // TODO(lawben): FIX THIS!
-    if constexpr (A::size() == 16) {
-      return genericPermute(data, byteSetBits[mask]);
-    } else if (A::size() == 32) {
-      // Do this twice.
-      auto x =
-          genericPermute(simd::getHalf<T, 0>(data), byteSetBits[mask & 0xFF]);
-      auto y =
-          genericPermute(simd::getHalf<T, 1>(data), byteSetBits[mask >> 8]);
-      auto numMatchesLow = folly::popcount(mask & 0xFF);
-      constexpr int N = xsimd::batch<T, A>::size;
-      alignas(A::alignment()) T data[N];
-      x.store_aligned(data);
-      y.store_unaligned(data + numMatchesLow);
-      return xsimd::batch<T, A>::load_aligned(data);
+    xsimd::batch<T, A> result;
+    auto* write_ptr = result.data.begin();
+    for (int i = 0; i < data.size; ++i) {
+      if (mask & (1ull << i)) {
+        *write_ptr++ = data.data[i];
+      }
     }
+
+    return result;
   }
 };
 
@@ -751,22 +685,12 @@ struct Filter<T, A, 8> {
 
 template <typename A>
 struct Crc32<uint64_t, A> {
-#ifdef __x86_64__
   static uint32_t
   apply(uint32_t checksum, uint64_t value, const xsimd::generic&) {
-    return _mm_crc32_u64(checksum, value);
+    boost::crc_32_type result(checksum);
+    result.process_bytes(&value, sizeof(value));
+    return result();
   }
-#endif
-
-#ifdef __aarch64__
-  static uint32_t
-  apply(uint32_t checksum, uint64_t value, const xsimd::generic&) {
-    __asm__("crc32cx %w[c], %w[c], %x[v]"
-            : [c] "+r"(checksum)
-            : [v] "r"(value));
-    return checksum;
-  }
-#endif
 };
 
 } // namespace detail
@@ -789,7 +713,7 @@ struct ReinterpretBatch {
   static xsimd::batch<T, A> apply(
       xsimd::batch<U, A> data,
       const xsimd::generic&) {
-    return xsimd::batch<T, A>(data.data);
+    return xsimd::batch<T, A>::load_aligned(data.data.data());
   }
 };
 

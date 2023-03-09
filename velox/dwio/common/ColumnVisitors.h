@@ -532,13 +532,12 @@ struct LoadIndices<int16_t, A> {
   static xsimd::batch<int32_t, A> apply(
       const int16_t* values,
       const xsimd::generic&) {
-    constexpr int N = xsimd::batch<int32_t, A>::size;
-    using ValVecT
-        __attribute__((vector_size(N * sizeof(uint16_t)), aligned(1))) =
-            uint16_t;
-    auto vals = *reinterpret_cast<const ValVecT*>(values);
-    return __builtin_convertvector(
-        vals, typename xsimd::batch<int32_t, A>::register_type);
+
+    xsimd::batch<int32_t, A> result;
+    for(size_t i = 0; i < result.size; ++i) {
+      result.data[i] = static_cast<uint16_t>(values[i]);
+    }
+    return result;
   }
 };
 
@@ -664,8 +663,13 @@ inline void storeTranslate(
 namespace detail {
 
 inline xsimd::batch<int64_t> cvtU32toI64(simd::HalfBatch<int32_t> values) {
-  return __builtin_convertvector(
-      values.data, xsimd::batch<int64_t>::register_type);
+
+  xsimd::batch<int64_t> result;
+  for(size_t i = 0; i < values.size; ++i) {
+    result.data[i] = static_cast<uint32_t>(values.data[i]);
+  }
+
+  return result;
 }
 
 } // namespace detail

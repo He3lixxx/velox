@@ -1,6 +1,11 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cstring>
+#include <functional>
+#include <memory>
 
 #ifdef __aarch64__
 #include <arm_neon.h>
@@ -25,7 +30,7 @@ struct generic16 {
     return 16;
   }
   static constexpr auto name() {
-    return "compiler_vec16";
+    return "compiler_autovec16";
   }
 };
 
@@ -39,7 +44,7 @@ struct generic32 {
     return 32;
   }
   static constexpr auto name() {
-    return "compiler_vec32";
+    return "compiler_autovec32";
   }
 };
 
@@ -52,7 +57,7 @@ struct generic64 {
     return 64;
   }
   static constexpr auto name() {
-    return "compiler_vec64";
+    return "compiler_autovec64";
   }
 };
 
@@ -76,7 +81,7 @@ struct half_vec {
     return 8;
   }
   static constexpr auto name() {
-    return "half_compiler_vec";
+    return "half_compiler_autovec";
   }
 };
 
@@ -105,17 +110,18 @@ struct simd_register {
   register_type data;
 };
 
-#define XSIMD_DECLARE_SIMD_REGISTER(SCALAR_TYPE, ISA)                          \
-  template <>                                                                  \
-  struct simd_register<SCALAR_TYPE, ISA> {                                     \
-    using vector_type __attribute__((vector_size(ISA::size()))) = SCALAR_TYPE; \
-    using register_type = vector_type;                                         \
-    register_type data;                                                        \
-    operator register_type() const noexcept {                                  \
-      return data;                                                             \
-    }                                                                          \
-  };                                                                           \
-  template <>                                                                  \
+#define XSIMD_DECLARE_SIMD_REGISTER(SCALAR_TYPE, ISA)               \
+  template <>                                                       \
+  struct simd_register<SCALAR_TYPE, ISA> {                          \
+    using vector_type =                                             \
+        std::array<SCALAR_TYPE, ISA::size() / sizeof(SCALAR_TYPE)>; \
+    using register_type = vector_type;                              \
+    register_type data;                                             \
+    operator register_type() const noexcept {                       \
+      return data;                                                  \
+    }                                                               \
+  };                                                                \
+  template <>                                                       \
   struct has_simd_register<SCALAR_TYPE, ISA> : std::true_type {}
 
 #define XSIMD_DECLARE_SIMD_REGISTERS(SCALAR_TYPE)      \
@@ -147,7 +153,7 @@ XSIMD_DECLARE_SIMD_REGISTERS(double);
 // XSIMD_DECLARE_SIMD_REGISTER(bool, generic);
 template <>
 struct simd_register<bool, generic> {
-  using vector_type __attribute__((vector_size(generic::size()))) = uint8_t;
+  using vector_type = std::array<uint8_t, generic::size()>;
   using register_type = vector_type;
   register_type data;
   operator register_type() const noexcept {
@@ -210,8 +216,36 @@ struct has_simd_register : types::has_simd_register<T, A> {};
 XSIMD_TEMPLATE
 struct batch;
 
-XSIMD_TEMPLATE
-struct batch_bool : public types::get_bool_simd_register_t<T, A> {
+template <typename FuncT, typename BatchT>
+BatchT binary_combine(const BatchT& batch1, const BatchT& batch2) noexcept {
+  BatchT result;
+  FuncT func;
+
+  for (size_t i = 0; i < BatchT::size; ++i) {
+    result.data[i] = func(batch1.data[i], batch2.data[i]);
+  }
+
+  return result;
+}
+
+struct left_shift {
+  template <class T, class U>
+  constexpr auto operator()(T&& lhs, U&& rhs) const
+      -> decltype(std::forward<T>(lhs) << std::forward<U>(rhs)) {
+    return std::forward<T>(lhs) << std::forward<U>(rhs);
+  }
+};
+
+struct right_shift {
+  template <class T, class U>
+  constexpr auto operator()(T&& lhs, U&& rhs) const
+      -> decltype(std::forward<T>(lhs) >> std::forward<U>(rhs)) {
+    return std::forward<T>(lhs) >> std::forward<U>(rhs);
+  }
+};
+
+XSIMD_TEMPLATE struct batch_bool
+    : public types::get_bool_simd_register_t<T, A> {
   static constexpr size_t size = A::size() / sizeof(T);
 
   using base_type = types::get_bool_simd_register_t<T, A>;
@@ -223,7 +257,7 @@ struct batch_bool : public types::get_bool_simd_register_t<T, A> {
   batch_bool() = default;
   batch_bool(bool val) noexcept {
     T initVal = val ? -1 : 0;
-    this->data = initVal - register_type{};
+    std::fill_n(this->data.data(), size, initVal);
   }
 
   batch_bool(register_type reg) noexcept {
@@ -233,7 +267,15 @@ struct batch_bool : public types::get_bool_simd_register_t<T, A> {
     // To process batch_bools the same way as done explicitly for AVX and NEON,
     // we only need to keep the most significant bit of each value.
     constexpr size_t MSB_SHIFT = (sizeof(T) * 8) - 1;
-    this->data = batch.data >> MSB_SHIFT;
+    std::transform(
+        batch.data.begin(),
+        batch.data.end(),
+        this->data.begin(),
+        [](const auto& el) {
+          uint64_t bits = 0;
+          std::memcpy(&bits, &el, sizeof(el));
+          return bits >> MSB_SHIFT;
+        });
   }
   //  template <class... Ts>
   //  batch_bool(bool val0, bool val1, Ts... vals) noexcept;
@@ -248,25 +290,35 @@ struct batch_bool : public types::get_bool_simd_register_t<T, A> {
 
   // logical operators
   batch_bool operator~() const noexcept {
-    return ~this->data;
+    auto copy = *this;
+    std::transform(
+        copy.data.begin(), copy.data.end(), copy.data.begin(), std::bit_not());
+    return copy;
   }
   batch_bool operator!() const noexcept {
-    return !this->data;
+    auto copy = *this;
+    std::transform(
+        copy.data.begin(),
+        copy.data.end(),
+        copy.data.begin(),
+        std::logical_not());
+    return copy;
   }
+
   batch_bool operator&(const batch_bool& other) const noexcept {
-    return this->data & other.data;
+    return binary_combine<std::bit_and<>>(*this, other);
   }
   batch_bool operator|(const batch_bool& other) const noexcept {
-    return this->data | other.data;
+    return binary_combine<std::bit_or<>>(*this, other);
   }
   batch_bool operator^(const batch_bool& other) const noexcept {
-    return this->data ^ other.data;
+    return binary_combine<std::bit_xor<>>(*this, other);
   }
   batch_bool operator&&(const batch_bool& other) const noexcept {
-    return this->data && other.data;
+    return binary_combine<std::logical_and<>>(*this, other);
   }
   batch_bool operator||(const batch_bool& other) const noexcept {
-    return this->data || other.data;
+    return binary_combine<std::logical_or<>>(*this, other);
   }
 
   // update operators
@@ -282,11 +334,8 @@ struct batch_bool : public types::get_bool_simd_register_t<T, A> {
 
   template <typename U>
   void store_aligned(U* dst) {
-    using batch_type = batch<T, A>;
-    alignas(A::alignment()) T buffer[this->size];
-    batch_type(*this).store_aligned(&buffer[0]);
     for (std::size_t i = 0; i < size; ++i) {
-      dst[i] = static_cast<bool>(buffer[i]);
+      dst[i] = static_cast<bool>(this->data[i]);
     }
   }
 
@@ -296,11 +345,11 @@ struct batch_bool : public types::get_bool_simd_register_t<T, A> {
   }
 
   static batch_bool load_aligned(const bool* src) {
-    batch_type ref{0};
-    alignas(A::alignment()) T buffer[size];
+    batch_type result;
     for (std::size_t i = 0; i < size; ++i)
-      buffer[i] = src[i] ? -1 : 0;
-    return ref != batch_type::load_aligned(&buffer[0]);
+      result.data[i] = src[i] ? -1 : 0;
+
+    return result;
   }
 
   static batch_bool load_unaligned(const bool* src) {
@@ -318,7 +367,7 @@ struct batch : public types::simd_register<T, A> {
   batch() = default;
 
   batch(T val) noexcept {
-    this->data = val - register_type{};
+    std::fill_n(this->data.data(), size, val);
   }
 
   explicit batch(const batch_bool_type& b) noexcept {
@@ -355,25 +404,25 @@ struct batch : public types::simd_register<T, A> {
   }
 
   batch operator^(const batch& other) const noexcept {
-    return this->data ^ other.data;
+    return binary_combine<std::bit_xor<>>(*this, other);
   }
   batch operator&(const batch& other) const noexcept {
-    return this->data & other.data;
+    return binary_combine<std::bit_and<>>(*this, other);
   }
   batch operator*(const batch& other) const noexcept {
-    return this->data * other.data;
+    return binary_combine<std::multiplies<>>(*this, other);
   }
   batch operator+(const batch& other) const noexcept {
-    return this->data + other.data;
+    return binary_combine<std::plus<>>(*this, other);
   }
   batch operator-(const batch& other) const noexcept {
-    return this->data - other.data;
+    return binary_combine<std::minus<>>(*this, other);
   }
   batch operator<<(const batch& other) const noexcept {
-    return this->data << other.data;
+    return binary_combine<left_shift>(*this, other);
   }
   batch operator>>(const batch& other) const noexcept {
-    return this->data >> other.data;
+    return binary_combine<right_shift>(*this, other);
   }
 
   T get(size_t pos) {
@@ -386,41 +435,32 @@ struct batch : public types::simd_register<T, A> {
 
   template <typename U>
   void store_aligned(U* dst) {
-    // xsimd widens or narrows during stores, so we need to as well.
-    constexpr size_t DEST_SIZE = sizeof(U) * size;
-    using TargetVecU __attribute__((vector_size(DEST_SIZE))) = U;
-    *reinterpret_cast<TargetVecU*>(dst) =
-        __builtin_convertvector(this->data, TargetVecU);
+    return store_unaligned(dst);
   }
 
   template <typename U>
   void store_unaligned(U* dst) {
     // xsimd widens or narrows during stores, so we need to as well.
-    constexpr size_t DEST_SIZE = sizeof(U) * size;
-    using TargetVecU __attribute__((vector_size(DEST_SIZE), aligned(1))) = U;
-    *reinterpret_cast<TargetVecU*>(dst) =
-        __builtin_convertvector(this->data, TargetVecU);
+    for (size_t i = 0; i < size; ++i) {
+      dst[i] = this->data[i];
+    }
   }
 
   template <typename U>
   static batch load_aligned(const U* src) {
-    // xsimd widens or narrows during loads, so we need to as well.
-    constexpr size_t SRC_SIZE = sizeof(U) * size;
-    using SrcVecU __attribute__((vector_size(SRC_SIZE))) = U;
-    auto in = *reinterpret_cast<const SrcVecU*>(src);
-    batch b{};
-    b.data = __builtin_convertvector(in, register_type);
-    return b;
+    return load_unaligned(src);
   }
 
   template <typename U>
   static batch load_unaligned(const U* src) {
-    constexpr size_t SRC_SIZE = sizeof(U) * size;
-    using SrcVecU __attribute__((vector_size(SRC_SIZE), aligned(1))) = U;
-    auto in = *reinterpret_cast<const SrcVecU*>(src);
-    batch b{};
-    b.data = __builtin_convertvector(in, register_type);
-    return b;
+    batch result;
+
+    // xsimd widens or narrows during loads, so we need to as well.
+    for (size_t i = 0; i < size; ++i) {
+      result.data[i] = src[i];
+    }
+
+    return result;
   }
 };
 

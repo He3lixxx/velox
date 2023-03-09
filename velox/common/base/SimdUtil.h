@@ -107,20 +107,16 @@ struct Batch64 : public xsimd::batch<T, xsimd::half_vec> {
   }
 
   void store_unaligned(T* out) const {
-    using DstVecU __attribute__((vector_size(8), aligned(1))) = T;
-    *reinterpret_cast<DstVecU*>(out) = this->data;
+    std::memcpy(out, this->data.data(), sizeof(this->data));
   }
 
   static Batch64 load_aligned(const T* mem) {
-    Batch64 b{};
-    b.data = *reinterpret_cast<const typename Batch64::register_type*>(mem);
-    return b;
+    return load_unaligned(mem);
   }
 
   static Batch64 load_unaligned(const T* mem) {
-    using SrcVecU __attribute__((vector_size(8), aligned(1))) = T;
-    Batch64 b{};
-    b.data = *reinterpret_cast<const SrcVecU*>(mem);
+    Batch64 b;
+    std::memcpy(b.data.data(), mem, sizeof(b.data));
     return b;
   }
 
@@ -348,19 +344,20 @@ template <
     typename A = xsimd::default_arch>
 auto getHalf(xsimd::batch<From, A> data, const A& arch = {}) {
   if constexpr (std::is_same_v<To, From>) {
-    return detail::GetHalf<To, From, A>::template applySame<kSecond>(data, arch);
+    return detail::GetHalf<To, From, A>::template applySame<kSecond>(
+        data, arch);
   } else {
     return detail::GetHalf<To, From, A>::template apply<kSecond>(data, arch);
   }
 }
 
-//template <
-//    typename T,
-//    bool kSecond,
-//    typename A = xsimd::default_arch>
-//HalfBatch<T, A> getHalf(xsimd::batch<T, A> data, const A& arch = {}) {
-//  return detail::GetHalf<T, T, A>::template apply<kSecond>(data, arch);
-//}
+// template <
+//     typename T,
+//     bool kSecond,
+//     typename A = xsimd::default_arch>
+// HalfBatch<T, A> getHalf(xsimd::batch<T, A> data, const A& arch = {}) {
+//   return detail::GetHalf<T, T, A>::template apply<kSecond>(data, arch);
+// }
 
 namespace detail {
 template <typename T, typename A>
@@ -387,14 +384,8 @@ xsimd::batch<T, A> reinterpretBatch(xsimd::batch<U, A>, const A& = {});
 template <typename T, typename A = xsimd::default_arch>
 xsimd::batch<T, A> setAll(T value, const A& = {}) {
   if constexpr (std::is_same_v<T, bool>) {
-#if defined(__aarch64__)
     return xsimd::batch<T, A>(
         xsimd::broadcast<unsigned char, A>(value ? -1 : 0));
-//    return simd::reinterpretBatch<bool>(
-//        xsimd::broadcast<unsigned char, A>(value ? -1 : 0));
-#else
-    return xsimd::batch<T, A>(xsimd::broadcast<int64_t, A>(value ? -1 : 0));
-#endif
   } else {
     return xsimd::broadcast<T, A>(value);
   }
