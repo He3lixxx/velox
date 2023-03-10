@@ -1088,9 +1088,7 @@ struct Crc32<uint64_t, A> {
 #if XSIMD_WITH_SSE2
   static uint32_t
   apply(uint32_t checksum, uint64_t value, const xsimd::sse2&) {
-    boost::crc_32_type result(checksum);
-    result.process_bytes(&value, sizeof(value));
-    return result();
+    return _mm_crc32_u64(checksum, value);
   }
 #endif
 
