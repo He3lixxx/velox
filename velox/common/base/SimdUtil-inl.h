@@ -69,10 +69,10 @@ struct BitMask<T, A> {
     //        0); int hi = std::accumulate(mask_arr.begin() + 8, mask_arr.end(),
     //        0); return (hi << 8) | lo;
 
-    int result;
+    int result = 0;
     for (size_t i = 0; i < mask.size; ++i) {
       if (mask.data[i]) {
-        result |= 1 << i;
+        result |= 1ull << i;
       }
     }
     return result;
@@ -504,7 +504,7 @@ xsimd::batch<T, A> genericPermute(xsimd::batch<T, A> data, const int32_t* idx) {
    alignas(A::alignment()) T dst[N];
    data.store_aligned(src);
    for (int i = 0; i < N; ++i) {
-     dst[i] = src[idx[i]];
+     dst[i] = idx[i] < 0 ? 0 : src[idx[i]];
    }
    return xsimd::load_aligned<A>(dst);
 }
@@ -649,7 +649,7 @@ template <typename T, typename A>
 struct Filter<T, A, 2> {
   static xsimd::batch<T, A>
   apply(xsimd::batch<T, A> data, int mask, const xsimd::generic&) {
-    xsimd::batch<T, A> result;
+    xsimd::batch<T, A> result(0);
     auto* write_ptr = result.data.begin();
     for (int i = 0; i < data.size; ++i) {
       if (mask & (1ull << i)) {
