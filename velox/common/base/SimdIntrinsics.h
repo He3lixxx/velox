@@ -254,15 +254,18 @@ XSIMD_TEMPLATE struct batch_bool
   using register_type = typename base_type::register_type;
   using batch_type = batch<T, A>;
 
+  static constexpr T true_v = -1;
+  static constexpr T false_v = 0;
+
   batch_bool() = default;
   batch_bool(bool val) noexcept {
-    T initVal = val ? -1 : 0;
-    std::fill_n(this->data.data(), size, initVal);
+    std::fill_n(this->data.data(), size, val ? true_v : false_v);
   }
 
   batch_bool(register_type reg) noexcept {
     this->data = reg;
   }
+
   batch_bool(batch_type batch) noexcept {
     // To process batch_bools the same way as done explicitly for AVX and NEON,
     // we only need to keep the most significant bit of each value.
@@ -274,7 +277,7 @@ XSIMD_TEMPLATE struct batch_bool
         [](const auto& el) {
           uint64_t bits = 0;
           std::memcpy(&bits, &el, sizeof(el));
-          return bits >> MSB_SHIFT;
+          return (bits >> MSB_SHIFT) ? true_v : false_v;
         });
   }
   //  template <class... Ts>
@@ -301,7 +304,7 @@ XSIMD_TEMPLATE struct batch_bool
         copy.data.begin(),
         copy.data.end(),
         copy.data.begin(),
-        std::logical_not());
+        std::bit_not());
     return copy;
   }
 
@@ -345,7 +348,7 @@ XSIMD_TEMPLATE struct batch_bool
   }
 
   static batch_bool load_aligned(const bool* src) {
-    batch_type result;
+    batch_bool result;
     for (std::size_t i = 0; i < size; ++i)
       result.data[i] = src[i] ? -1 : 0;
 
@@ -356,6 +359,20 @@ XSIMD_TEMPLATE struct batch_bool
     return load_aligned(src);
   }
 };
+
+template <typename FuncT, typename ResultT, typename BatchT>
+ResultT binary_combine_to_vec_bool(
+    const BatchT& batch1,
+    const BatchT& batch2) noexcept {
+  ResultT result;
+  FuncT func;
+
+  for (size_t i = 0; i < BatchT::size; ++i) {
+    result.data[i] = func(batch1.data[i], batch2.data[i]) ? -1 : 0;
+  }
+
+  return result;
+}
 
 template <typename T, typename A>
 struct batch : public types::simd_register<T, A> {
@@ -385,22 +402,28 @@ struct batch : public types::simd_register<T, A> {
   };
 
   batch_bool<T, A> operator==(const batch& other) const noexcept {
-    return batch_bool<T, A>(this->data == other.data);
+    return binary_combine_to_vec_bool<std::equal_to<>, batch_bool<T, A>>(
+        *this, other);
   }
   batch_bool<T, A> operator!=(const batch& other) const noexcept {
-    return batch_bool<T, A>(this->data != other.data);
+    return binary_combine_to_vec_bool<std::not_equal_to<>, batch_bool<T, A>>(
+        *this, other);
   }
   batch_bool<T, A> operator>=(const batch& other) const noexcept {
-    return batch_bool<T, A>(this->data >= other.data);
+    return binary_combine_to_vec_bool<std::greater_equal<>, batch_bool<T, A>>(
+        *this, other);
   }
   batch_bool<T, A> operator<=(const batch& other) const noexcept {
-    return batch_bool<T, A>(this->data <= other.data);
+    return binary_combine_to_vec_bool<std::less_equal<>, batch_bool<T, A>>(
+        *this, other);
   }
   batch_bool<T, A> operator>(const batch& other) const noexcept {
-    return batch_bool<T, A>(this->data > other.data);
+    return binary_combine_to_vec_bool<std::greater<>, batch_bool<T, A>>(
+        *this, other);
   }
   batch_bool<T, A> operator<(const batch& other) const noexcept {
-    return batch_bool<T, A>(this->data < other.data);
+    return binary_combine_to_vec_bool<std::less<>, batch_bool<T, A>>(
+        *this, other);
   }
 
   batch operator^(const batch& other) const noexcept {
