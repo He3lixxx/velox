@@ -685,12 +685,25 @@ struct Filter<T, A, 8> {
 
 template <typename A>
 struct Crc32<uint64_t, A> {
+#ifdef __x86_64__
   static uint32_t
   apply(uint32_t checksum, uint64_t value, const xsimd::generic&) {
+    return _mm_crc32_u64(checksum, value);
+  }
+#endif
+
+#ifdef __aarch64__
+  static uint32_t
+  apply(uint32_t checksum, uint64_t value, const xsimd::generic&) {
+    __asm__("crc32cx %w[c], %w[c], %x[v]"
+            : [c] "+r"(checksum)
+            : [v] "r"(value));
+    return checksum;
     boost::crc_32_type result(checksum);
     result.process_bytes(&value, sizeof(value));
     return result();
   }
+#endif
 };
 
 } // namespace detail
