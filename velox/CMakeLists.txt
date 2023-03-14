@@ -12,6 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Do not apply native-flags to duckdb as it causes insane compilation times
+if(${VELOX_ENABLE_DUCKDB})
+  add_subdirectory(duckdb)
+  add_subdirectory(external/duckdb)
+endif()
+
+
+#NATIVE_FLAGS_HERE_MARKER
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ")
+
+
 # VELOX BASE
 include_directories(external/xxhash)
 add_subdirectory(buffer)
@@ -59,11 +70,6 @@ add_subdirectory(connectors)
 if(${VELOX_ENABLE_EXEC})
   add_subdirectory(exec)
   add_subdirectory(codegen)
-endif()
-
-if(${VELOX_ENABLE_DUCKDB})
-  add_subdirectory(duckdb)
-  add_subdirectory(external/duckdb)
 endif()
 
 if(${VELOX_CODEGEN_SUPPORT})
