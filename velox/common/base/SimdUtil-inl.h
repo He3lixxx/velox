@@ -486,7 +486,7 @@ xsimd::batch<int16_t, A> pack32(
     xsimd::batch<int32_t, A> x,
     xsimd::batch<int32_t, A> y,
     const xsimd::generic&) {
-  alignas(2 * x.size) std::array<uint16_t, 2 * x.size> out_data;
+  alignas(A::alignment()) std::array<uint16_t, 2 * x.size> out_data;
   for (size_t i = 0; i < x.size; ++i) {
     out_data[i] = static_cast<uint32_t>(x.get(i));
   }
@@ -500,13 +500,13 @@ xsimd::batch<int16_t, A> pack32(
 template <typename T, typename A>
 xsimd::batch<T, A> genericPermute(xsimd::batch<T, A> data, const int32_t* idx) {
   constexpr int N = xsimd::batch<T, A>::size;
-   alignas(A::alignment()) T src[N];
-   alignas(A::alignment()) T dst[N];
-   data.store_aligned(src);
-   for (int i = 0; i < N; ++i) {
-     dst[i] = idx[i] < 0 ? 0 : src[idx[i]];
-   }
-   return xsimd::load_aligned<A>(dst);
+  alignas(A::alignment()) T src[N];
+  alignas(A::alignment()) T dst[N];
+  data.store_aligned(src);
+  for (int i = 0; i < N; ++i) {
+    dst[i] = idx[i] < 0 ? 0 : src[idx[i]];
+  }
+  return xsimd::load_aligned<A>(dst);
 }
 
 template <typename T, typename A>
@@ -622,7 +622,7 @@ struct GetHalf {
     // original AVX code uses cvtepi with sign-extension if TargetT is signed,
     // otherwise cvtepu with zero-extension.
 
-    alignas(data.size) std::array<TargetT, data.size / 2> result_data;
+    alignas(A::alignment()) std::array<TargetT, data.size / 2> result_data;
     for (size_t i = 0; i < data.size / 2; ++i) {
       if constexpr (std::is_unsigned_v<TargetT>) {
         result_data[i] =

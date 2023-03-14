@@ -116,7 +116,7 @@ struct simd_register {
     using vector_type =                                             \
         std::array<SCALAR_TYPE, ISA::size() / sizeof(SCALAR_TYPE)>; \
     using register_type = vector_type;                              \
-    register_type data;                                             \
+    alignas(ISA::alignment()) register_type data;                   \
     operator register_type() const noexcept {                       \
       return data;                                                  \
     }                                                               \
@@ -155,7 +155,7 @@ template <>
 struct simd_register<bool, generic> {
   using vector_type = std::array<uint8_t, generic::size()>;
   using register_type = vector_type;
-  register_type data;
+  alignas(generic::alignment()) register_type data;
   operator register_type() const noexcept {
     return data;
   }
@@ -301,10 +301,7 @@ XSIMD_TEMPLATE struct batch_bool
   batch_bool operator!() const noexcept {
     auto copy = *this;
     std::transform(
-        copy.data.begin(),
-        copy.data.end(),
-        copy.data.begin(),
-        std::bit_not());
+        copy.data.begin(), copy.data.end(), copy.data.begin(), std::bit_not());
     return copy;
   }
 
