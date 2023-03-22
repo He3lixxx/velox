@@ -15,6 +15,7 @@
  */
 
 #include <bit>
+#include <cstring>
 #include <numeric>
 
 namespace facebook::velox::simd {
@@ -35,20 +36,13 @@ int genericToBitMask(xsimd::batch_bool<T, A> mask) {
 
 template <typename T, typename A>
 xsimd::batch_bool<T, A> fromBitMaskImpl(int mask) {
-  static const auto kMemo = ({
-    constexpr int N = xsimd::batch_bool<T, A>::size;
-    static_assert(N <= 8);
-    std::array<xsimd::batch_bool<T, A>, (1 << N)> memo;
-    for (int i = 0; i < (1 << N); ++i) {
-      bool tmp[N];
-      for (int bit = 0; bit < N; ++bit) {
-        tmp[bit] = (i & (1 << bit)) ? true : false;
-      }
-      memo[i] = xsimd::batch_bool<T, A>::load_unaligned(tmp);
-    }
-    memo;
-  });
-  return kMemo[mask];
+  constexpr int VEC_SIZE = xsimd::batch_bool<T, A>::size;
+  using MaskVecT  __attribute__((ext_vector_type(VEC_SIZE))) = bool;
+
+  MaskVecT mask_vec;
+  std::memcpy(&mask_vec, &mask, sizeof(mask_vec));
+
+  return __builtin_convertvector(mask_vec, typename xsimd::batch_bool<T, A>::register_type);
 }
 
 template <typename T, typename A>
@@ -141,7 +135,13 @@ int32_t indicesOfSetBits(
         if (byte) {
           using Batch = xsimd::batch<int32_t, A>;
           auto indices = byteSetBits(byte);
-          if constexpr (Batch::size == 8) {
+          if constexpr (Batch::size == 16) {
+            // There's only 8 elements here, so we can't benefit from 64B batches. When 64B registers are available, just fall back to 32B registers.
+            using RealBatch = xsimd::batch<int32_t, xsimd::generic32>;
+            static_assert(RealBatch::size == 8);
+            (RealBatch::load_aligned(indices) + row).store_unaligned(result);
+            result += __builtin_popcount(byte);
+          } else if constexpr (Batch::size == 8) {
             (Batch::load_aligned(indices) + row).store_unaligned(result);
             result += __builtin_popcount(byte);
           } else {
@@ -711,7 +711,7 @@ struct Filter<T, A, 2> {
     // TODO(lawben): FIX THIS!
     if constexpr (A::size() == 16) {
       return genericPermute(data, byteSetBits[mask]);
-    } else if (A::size() == 32) {
+    } else if constexpr (A::size() == 32) {
       // Do this twice.
       auto x =
           genericPermute(simd::getHalf<T, 0>(data), byteSetBits[mask & 0xFF]);
@@ -723,6 +723,29 @@ struct Filter<T, A, 2> {
       x.store_aligned(data);
       y.store_unaligned(data + numMatchesLow);
       return xsimd::batch<T, A>::load_aligned(data);
+    } else if constexpr (A::size() == 64) {
+
+      using ShuffleMaskT __attribute__((vector_size(32))) = uint8_t;
+      using WideShuffleSubmask __attribute__((vector_size(32))) = uint32_t;
+      using ShuffleSubmask __attribute__((vector_size(8))) = uint8_t;
+
+      ShuffleMaskT shuffle_mask;
+
+      for(int i = 0; i < 4; ++i) {
+        // byteSetBits ist 8-Array von uint32_t
+        auto setBits = byteSetBits[mask & 0xFF];
+        mask >>= 8;
+
+        WideShuffleSubmask wide_submask;
+        std::memcpy(&wide_submask, &setBits, sizeof(setBits));
+
+        ShuffleSubmask submask = __builtin_convertvector(wide_submask, ShuffleSubmask);
+
+        std::memcpy((ShuffleSubmask*)(&shuffle_mask) + i, &submask, sizeof(submask));
+      }
+
+      auto result = __builtin_shufflevector(data.data, shuffle_mask);
+      return result;
     }
   }
 };

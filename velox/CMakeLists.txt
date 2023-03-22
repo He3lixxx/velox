@@ -20,7 +20,7 @@ endif()
 
 
 #NATIVE_FLAGS_HERE_MARKER
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -mtune=native")
 
 
 # VELOX BASE
