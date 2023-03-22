@@ -808,6 +808,7 @@ class DictionaryColumnVisitor
     // written, the passing bitmap is used to load a permute mask to
     // permute the passing values to the left of a vector register and
     // write  the whole register to the end of 'values'
+    asm volatile(".nops 8" : );
     constexpr bool kFilterOnly =
         std::is_same_v<typename super::Extract, DropValues>;
     constexpr int32_t kWidth = xsimd::batch<int32_t>::size;
