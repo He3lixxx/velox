@@ -35,21 +35,29 @@ int genericToBitMask(xsimd::batch_bool<T, A> mask) {
 }
 
 template <typename T, typename A>
-xsimd::batch_bool<T, A> fromBitMaskImpl(int mask) {
+xsimd::batch_bool<T, A> fromBitMaskImpl(uint64_t mask) {
   constexpr int VEC_SIZE = xsimd::batch_bool<T, A>::size;
   using MaskVecT  __attribute__((ext_vector_type(VEC_SIZE))) = bool;
 
+  using VecT = typename xsimd::batch_bool<T, A>::register_type;
+  constexpr T all_bits_set_value = (std::make_unsigned_t<T>)(-1);
+  constexpr VecT all_set = all_bits_set_value - VecT{};
+  constexpr VecT none_set = VecT{};
+
   MaskVecT mask_vec;
   std::memcpy(&mask_vec, &mask, sizeof(mask_vec));
+  auto widened_mask_vec = __builtin_convertvector(mask_vec, VecT);
 
-  return __builtin_convertvector(mask_vec, typename xsimd::batch_bool<T, A>::register_type);
+  auto result = widened_mask_vec ? all_set : none_set;
+
+  return result;
 }
 
 template <typename T, typename A>
 struct BitMask<T, A> {
   static constexpr int kAllSet = bits::lowMask(xsimd::batch_bool<T, A>::size);
 
-  static int toBitMask(xsimd::batch_bool<T, A> mask, const xsimd::generic&) {
+  static uint64_t toBitMask(xsimd::batch_bool<T, A> mask, const xsimd::generic&) {
     // Generic GCC version
     //        alignas(A::alignment()) static const uint8_t kAnd[] = {
     //            1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
@@ -78,7 +86,7 @@ struct BitMask<T, A> {
     }
   }
 
-  static xsimd::batch_bool<T, A> fromBitMask(int mask, const A&) {
+  static xsimd::batch_bool<T, A> fromBitMask(uint64_t mask, const A&) {
     return UNLIKELY(mask == kAllSet) ? xsimd::batch_bool<T, A>(true)
                                      : fromBitMaskImpl<T, A>(mask);
   }
@@ -707,7 +715,7 @@ extern int32_t permute4x64Indices[16][8];
 template <typename T, typename A>
 struct Filter<T, A, 2> {
   static xsimd::batch<T, A>
-  apply(xsimd::batch<T, A> data, int mask, const xsimd::generic&) {
+  apply(xsimd::batch<T, A> data, uint64_t mask, const xsimd::generic&) {
     // TODO(lawben): FIX THIS!
     if constexpr (A::size() == 16) {
       return genericPermute(data, byteSetBits[mask]);
@@ -731,17 +739,22 @@ struct Filter<T, A, 2> {
 
       ShuffleMaskT shuffle_mask;
 
+      int numMatches = 0;
+
       for(int i = 0; i < 4; ++i) {
         // byteSetBits ist 8-Array von uint32_t
         auto setBits = byteSetBits[mask & 0xFF];
-        mask >>= 8;
 
         WideShuffleSubmask wide_submask;
-        std::memcpy(&wide_submask, &setBits, sizeof(setBits));
+        std::memcpy(&wide_submask, setBits, sizeof(setBits) * sizeof(setBits[0]));
 
         ShuffleSubmask submask = __builtin_convertvector(wide_submask, ShuffleSubmask);
+        submask += static_cast<uint8_t>(8*i);
 
-        std::memcpy((ShuffleSubmask*)(&shuffle_mask) + i, &submask, sizeof(submask));
+        std::memcpy((uint8_t*)(&shuffle_mask) + numMatches, &submask, sizeof(submask));
+
+        numMatches += folly::popcount(mask & 0xFF);
+        mask >>= 8;
       }
 
       auto result = __builtin_shufflevector(data.data, shuffle_mask);
@@ -753,12 +766,12 @@ struct Filter<T, A, 2> {
 template <typename T, typename A>
 struct Filter<T, A, 4> {
   static xsimd::batch<T, A>
-  apply(xsimd::batch<T, A> data, int mask, const A& arch) {
+  apply(xsimd::batch<T, A> data, uint64_t mask, const A& arch) {
     auto vindex = xsimd::batch<int32_t, A>::load_aligned(byteSetBits[mask]);
     return Permute<T, A>::apply(data, vindex, arch);
   }
 
-  static HalfBatch<T, A> apply(HalfBatch<T, A> data, int mask, const A& arch) {
+  static HalfBatch<T, A> apply(HalfBatch<T, A> data, uint64_t mask, const A& arch) {
     auto vindex = HalfBatch<int32_t, A>::load_aligned(byteSetBits[mask]);
     return Permute<T, A>::apply(data, vindex, arch);
   }
@@ -767,7 +780,7 @@ struct Filter<T, A, 4> {
 template <typename T, typename A>
 struct Filter<T, A, 8> {
   static xsimd::batch<T, A>
-  apply(xsimd::batch<T, A> data, int mask, const xsimd::generic&) {
+  apply(xsimd::batch<T, A> data, uint64_t mask, const xsimd::generic&) {
     return genericPermute(data, byteSetBits[mask]);
   }
 };

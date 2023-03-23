@@ -134,7 +134,7 @@ class MmapAllocator : public MemoryAllocator {
   std::string toString() const override;
 
  private:
-  static constexpr uint64_t kAllSet = 0xffffffffffffffff;
+  static constexpr uint64_t kAllSet = std::numeric_limits<uint64_t>::max();
 
   // Represents a range of virtual addresses used for allocating entries of
   // 'unitSize_' machine pages.

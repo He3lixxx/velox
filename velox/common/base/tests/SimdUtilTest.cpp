@@ -169,14 +169,14 @@ TEST_F(SimdUtilTest, gather32) {
       data,
       indicesMask);
   for (auto i = 0; i < 16; ++i) {
-    if(!(indices[i] & 1 << 31)) {
-      EXPECT_EQ(resultMask.get(i), data[indices[i]]);
+    if(!(indicesMask[i] & (1 << 31))) {
+      EXPECT_EQ(resultMask.get(i), data[indicesMask[i]]);
     } else {
       EXPECT_EQ(resultMask.get(i), -1);
     }
   }
   auto bits = simd::toBitMask(result == resultMask);
-  EXPECT_EQ(0b1111111111111100, bits);
+  EXPECT_EQ(0b0011111111111111, bits);
 }
 
 TEST_F(SimdUtilTest, gather64) {
@@ -195,12 +195,12 @@ TEST_F(SimdUtilTest, gather64) {
       simd::leadingMask<int64_t>(8 - 1),
       data,
       indicesMask);
-  for (auto i = 0; i < 8; ++i) {
-    EXPECT_EQ(resultMask.get(i), data[indices[i]]);
+  for (auto i = 0; i < 7; ++i) {
+    EXPECT_EQ(resultMask.get(i), data[indicesMask[i]]);
   }
-  EXPECT_EQ(resultMask.get(8), -1);
+  EXPECT_EQ(resultMask.get(7), -1);
   auto bits = simd::toBitMask(result == resultMask);
-  EXPECT_EQ(0b11111110, bits);
+  EXPECT_EQ(0b01111111, bits);
 }
 
 TEST_F(SimdUtilTest, gather16) {
@@ -239,7 +239,10 @@ namespace {
 // Find elements that satisfy a condition and pack them to the left.
 template <typename T>
 void testFilter(std::initializer_list<T> data) {
-  auto batch = xsimd::load_unaligned(data.begin());
+  std::vector<T> extended_data(data);
+  extended_data.resize(xsimd::batch<T>::size);
+
+  auto batch = xsimd::load_unaligned(extended_data.data());
   auto result = simd::filter(batch, simd::toBitMask(batch > 15000));
   int32_t j = 0;
   for (auto i = 0; i < xsimd::batch<T>::size; ++i) {
@@ -291,33 +294,43 @@ TEST_F(SimdUtilTest, filterDouble) {
 
 TEST_F(SimdUtilTest, misc) {
   // Widen to int64 from 4 uints
-  uint32_t uints4[4] = {10000, 0, 0, 4000000000};
-  int64_t longs4[4];
-  xsimd::batch<int64_t>::load_unaligned(uints4).store_unaligned(longs4);
+  uint32_t uints4[8] = {10000, 0, 0, 4000000000};
+  int64_t longs4[8];
+  auto batch = xsimd::batch<int64_t>::load_unaligned(uints4);
+  batch.store_unaligned(longs4);
+
   for (auto i = 0; i < xsimd::batch<int64_t>::size; ++i) {
     EXPECT_EQ(uints4[i], longs4[i]);
   }
 
   // Widen to int64 from one half of 8 uints.
-  uint32_t uints8[8] = {
-      1, 2, 3, 4, 1000000000, 2000000000, 3000000000, 4000000000};
+  uint32_t uints8[16] = {
+      1, 2, 3, 4, 1000000000, 2000000000, 3000000000, 4000000000, 5, 6, 7, 8, 10, 11, 12, 13};
   auto vuints8 = xsimd::batch<int32_t>::load_unaligned(uints8);
-  auto last4 = simd::getHalf<uint64_t, 1>(vuints8);
-  if constexpr (last4.size == 4) {
-    EXPECT_EQ(4000000000, last4.get(3));
+  auto lastHalf = simd::getHalf<uint64_t, 1>(vuints8);
+
+  if constexpr (lastHalf.size == 8) {
+    EXPECT_EQ(8, lastHalf.get(3));
+    EXPECT_EQ(static_cast<int32_t>(8), vuints8.get(11));
+  } else if constexpr (lastHalf.size == 4) {
+    EXPECT_EQ(4000000000, lastHalf.get(3));
     EXPECT_EQ(static_cast<int32_t>(4000000000), vuints8.get(7));
   } else {
-    ASSERT_EQ(last4.size, 2);
-    EXPECT_EQ(4, last4.get(1));
+    ASSERT_EQ(lastHalf.size, 2);
+    EXPECT_EQ(4, lastHalf.get(1));
     EXPECT_EQ(4, vuints8.get(3));
   }
 
   // Masks
   for (auto i = 0; i < xsimd::batch<int32_t>::size; ++i) {
-    auto compare = simd::toBitMask(
-        simd::leadingMask<int32_t>(i) ==
-        simd::fromBitMask<int32_t>((1 << i) - 1));
-    EXPECT_EQ(simd::allSetBitMask<int32_t>(), compare);
+    auto leading_mask = simd::leadingMask<int32_t>(i);
+    auto manual_mask = simd::fromBitMask<int32_t>((1 << i) - 1);
+    auto comparison_result = leading_mask == manual_mask;
+
+    auto compare = simd::toBitMask(comparison_result);
+    auto all_set = simd::allSetBitMask<int32_t>();
+    EXPECT_EQ(all_set, compare);
+
     if (i < xsimd::batch<int64_t>::size) {
       compare = simd::toBitMask(
           simd::leadingMask<int64_t>(i) ==
